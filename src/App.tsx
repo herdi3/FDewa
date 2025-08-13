@@ -158,7 +158,7 @@ const AppContent: React.FC = () => {
   const handleLoginSuccess = async (email: string, password: string) => {
     const { user, error } = await signIn(email, password);
     if (error) {
-      showNotification(error);
+      throw new Error(error);
     } else if (user) {
       setActiveView(ViewType.DASHBOARD);
       showNotification('Login berhasil!');
@@ -197,7 +197,7 @@ const AppContent: React.FC = () => {
     }
   };
 
-  const handleUpdateRevision = (projectId: string, revisionId: string, updatedData: { freelancerNotes: string, driveLink: string, status: RevisionStatus }) => {
+  const handleUpdateRevision = async (projectId: string, revisionId: string, updatedData: { freelancerNotes: string, driveLink: string, status: RevisionStatus }) => {
     const project = projects.find(p => p.id === projectId);
     if (!project) return;
 
@@ -214,20 +214,17 @@ const AppContent: React.FC = () => {
       return r;
     });
 
-    updateProject(projectId, { revisions: updatedRevisions });
+    await updateProject(projectId, { revisions: updatedRevisions });
     showNotification("Update revisi telah berhasil dikirim.");
   };
 
-  const handleClientConfirmation = (projectId: string, stage: 'editing' | 'printing' | 'delivery') => {
-    const project = projects.find(p => p.id === projectId);
-    if (!project) return;
-
+  const handleClientConfirmation = async (projectId: string, stage: 'editing' | 'printing' | 'delivery') => {
     const updates: Partial<Project> = {};
     if (stage === 'editing') updates.isEditingConfirmedByClient = true;
     if (stage === 'printing') updates.isPrintingConfirmedByClient = true;
     if (stage === 'delivery') updates.isDeliveryConfirmedByClient = true;
 
-    updateProject(projectId, updates);
+    await updateProject(projectId, updates);
     showNotification("Konfirmasi telah diterima. Terima kasih!");
   };
     
@@ -301,11 +298,61 @@ const AppContent: React.FC = () => {
       <div className="flex items-center justify-center min-h-screen bg-brand-bg">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-brand-accent mx-auto mb-4"></div>
-          <p className="text-brand-text-secondary">Memuat data...</p>
+          <p className="text-brand-text-secondary">Memuat data dari Supabase...</p>
         </div>
       </div>
     );
   }
+
+  // Helper function to create async state setters for Supabase integration
+  const createAsyncSetter = <T extends { id: string }>(
+    data: T[],
+    insertFn: (item: Omit<T, 'id'>) => Promise<T>,
+    updateFn: (id: string, updates: Partial<T>) => Promise<T>,
+    removeFn?: (id: string) => Promise<void>
+  ) => {
+    return async (updater: React.SetStateAction<T[]>) => {
+      if (typeof updater === 'function') {
+        const newData = updater(data);
+        
+        // Find new items (items that don't exist in current data)
+        const newItems = newData.filter(newItem => !data.find(existing => existing.id === newItem.id));
+        
+        // Find updated items (items that exist but have changed)
+        const updatedItems = newData.filter(newItem => {
+          const existing = data.find(e => e.id === newItem.id);
+          return existing && JSON.stringify(existing) !== JSON.stringify(newItem);
+        });
+        
+        // Find removed items (items that exist in current data but not in new data)
+        const removedItems = data.filter(existing => !newData.find(newItem => newItem.id === existing.id));
+
+        try {
+          // Insert new items
+          for (const item of newItems) {
+            const { id, ...itemWithoutId } = item;
+            await insertFn(itemWithoutId);
+          }
+
+          // Update changed items
+          for (const item of updatedItems) {
+            const { id, ...updates } = item;
+            await updateFn(id, updates);
+          }
+
+          // Remove deleted items
+          if (removeFn) {
+            for (const item of removedItems) {
+              await removeFn(item.id);
+            }
+          }
+        } catch (error) {
+          console.error('Error syncing data with Supabase:', error);
+          showNotification('Terjadi kesalahan saat menyimpan data');
+        }
+      }
+    };
+  };
   
   const renderView = () => {
     if (!hasPermission(activeView)) {
@@ -333,425 +380,120 @@ const AppContent: React.FC = () => {
       case ViewType.PROSPEK:
         return <Leads
             leads={leads} 
-            setLeads={async (updater) => {
-              if (typeof updater === 'function') {
-                const newLeads = updater(leads);
-                // Handle array updates by comparing and applying changes
-                for (const lead of newLeads) {
-                  const existing = leads.find(l => l.id === lead.id);
-                  if (!existing) {
-                    await insertLead(lead);
-                  } else if (JSON.stringify(existing) !== JSON.stringify(lead)) {
-                    await updateLead(lead.id, lead);
-                  }
-                }
-              }
-            }}
+            setLeads={createAsyncSetter(leads, insertLead, updateLead, removeLead)}
             clients={clients} 
-            setClients={async (updater) => {
-              if (typeof updater === 'function') {
-                const newClients = updater(clients);
-                for (const client of newClients) {
-                  const existing = clients.find(c => c.id === client.id);
-                  if (!existing) {
-                    await insertClient(client);
-                  }
-                }
-              }
-            }}
+            setClients={createAsyncSetter(clients, insertClient, updateClient, removeClient)}
             projects={projects} 
-            setProjects={async (updater) => {
-              if (typeof updater === 'function') {
-                const newProjects = updater(projects);
-                for (const project of newProjects) {
-                  const existing = projects.find(p => p.id === project.id);
-                  if (!existing) {
-                    await insertProject(project);
-                  }
-                }
-              }
-            }}
+            setProjects={createAsyncSetter(projects, insertProject, updateProject, removeProject)}
             packages={packages} addOns={addOns}
             transactions={transactions} 
-            setTransactions={async (updater) => {
-              if (typeof updater === 'function') {
-                const newTransactions = updater(transactions);
-                for (const transaction of newTransactions) {
-                  const existing = transactions.find(t => t.id === transaction.id);
-                  if (!existing) {
-                    await insertTransaction(transaction);
-                  }
-                }
-              }
-            }}
+            setTransactions={createAsyncSetter(transactions, insertTransaction, updateTransaction, removeTransaction)}
             userProfile={profile!} showNotification={showNotification}
             cards={cards} 
-            setCards={async (updater) => {
-              if (typeof updater === 'function') {
-                const newCards = updater(cards);
-                for (const card of newCards) {
-                  const existing = cards.find(c => c.id === card.id);
-                  if (existing && JSON.stringify(existing) !== JSON.stringify(card)) {
-                    await updateCard(card.id, card);
-                  }
-                }
-              }
-            }}
+            setCards={createAsyncSetter(cards, insertCard, updateCard, removeCard)}
             pockets={pockets} 
-            setPockets={async (updater) => {
-              if (typeof updater === 'function') {
-                const newPockets = updater(pockets);
-                for (const pocket of newPockets) {
-                  const existing = pockets.find(p => p.id === pocket.id);
-                  if (existing && JSON.stringify(existing) !== JSON.stringify(pocket)) {
-                    await updatePocket(pocket.id, pocket);
-                  }
-                }
-              }
-            }}
+            setPockets={createAsyncSetter(pockets, insertPocket, updatePocket, removePocket)}
             promoCodes={promoCodes} 
-            setPromoCodes={async (updater) => {
-              if (typeof updater === 'function') {
-                const newPromoCodes = updater(promoCodes);
-                for (const promo of newPromoCodes) {
-                  const existing = promoCodes.find(p => p.id === promo.id);
-                  if (existing && JSON.stringify(existing) !== JSON.stringify(promo)) {
-                    await updatePromoCode(promo.id, promo);
-                  }
-                }
-              }
-            }}
+            setPromoCodes={createAsyncSetter(promoCodes, insertPromoCode, updatePromoCode, removePromoCode)}
         />;
       case ViewType.CLIENTS:
         return <Clients
           clients={clients} 
-          setClients={async (updater) => {
-            if (typeof updater === 'function') {
-              const newClients = updater(clients);
-              for (const client of newClients) {
-                const existing = clients.find(c => c.id === client.id);
-                if (!existing) {
-                  await insertClient(client);
-                } else if (JSON.stringify(existing) !== JSON.stringify(client)) {
-                  await updateClient(client.id, client);
-                }
-              }
-            }
-          }}
+          setClients={createAsyncSetter(clients, insertClient, updateClient, removeClient)}
           projects={projects} 
-          setProjects={async (updater) => {
-            if (typeof updater === 'function') {
-              const newProjects = updater(projects);
-              for (const project of newProjects) {
-                const existing = projects.find(p => p.id === project.id);
-                if (!existing) {
-                  await insertProject(project);
-                } else if (JSON.stringify(existing) !== JSON.stringify(project)) {
-                  await updateProject(project.id, project);
-                }
-              }
-            }
-          }}
+          setProjects={createAsyncSetter(projects, insertProject, updateProject, removeProject)}
           packages={packages} addOns={addOns}
           transactions={transactions} 
-          setTransactions={async (updater) => {
-            if (typeof updater === 'function') {
-              const newTransactions = updater(transactions);
-              for (const transaction of newTransactions) {
-                const existing = transactions.find(t => t.id === transaction.id);
-                if (!existing) {
-                  await insertTransaction(transaction);
-                }
-              }
-            }
-          }}
+          setTransactions={createAsyncSetter(transactions, insertTransaction, updateTransaction, removeTransaction)}
           userProfile={profile!}
           showNotification={showNotification}
           initialAction={initialAction} setInitialAction={setInitialAction}
           cards={cards} 
-          setCards={async (updater) => {
-            if (typeof updater === 'function') {
-              const newCards = updater(cards);
-              for (const card of newCards) {
-                const existing = cards.find(c => c.id === card.id);
-                if (existing && JSON.stringify(existing) !== JSON.stringify(card)) {
-                  await updateCard(card.id, card);
-                }
-              }
-            }
-          }}
+          setCards={createAsyncSetter(cards, insertCard, updateCard, removeCard)}
           pockets={pockets} 
-          setPockets={async (updater) => {
-            if (typeof updater === 'function') {
-              const newPockets = updater(pockets);
-              for (const pocket of newPockets) {
-                const existing = pockets.find(p => p.id === pocket.id);
-                if (existing && JSON.stringify(existing) !== JSON.stringify(pocket)) {
-                  await updatePocket(pocket.id, pocket);
-                }
-              }
-            }
-          }}
+          setPockets={createAsyncSetter(pockets, insertPocket, updatePocket, removePocket)}
           contracts={contracts}
           handleNavigation={handleNavigation}
           clientFeedback={clientFeedback}
           promoCodes={promoCodes} 
-          setPromoCodes={async (updater) => {
-            if (typeof updater === 'function') {
-              const newPromoCodes = updater(promoCodes);
-              for (const promo of newPromoCodes) {
-                const existing = promoCodes.find(p => p.id === promo.id);
-                if (existing && JSON.stringify(existing) !== JSON.stringify(promo)) {
-                  await updatePromoCode(promo.id, promo);
-                }
-              }
-            }
-          }}
+          setPromoCodes={createAsyncSetter(promoCodes, insertPromoCode, updatePromoCode, removePromoCode)}
           onSignInvoice={handleSignInvoice}
           onSignTransaction={handleSignTransaction}
         />;
       case ViewType.PROJECTS:
         return <Projects 
           projects={projects} 
-          setProjects={async (updater) => {
-            if (typeof updater === 'function') {
-              const newProjects = updater(projects);
-              for (const project of newProjects) {
-                const existing = projects.find(p => p.id === project.id);
-                if (!existing) {
-                  await insertProject(project);
-                } else if (JSON.stringify(existing) !== JSON.stringify(project)) {
-                  await updateProject(project.id, project);
-                }
-              }
-            }
-          }}
+          setProjects={createAsyncSetter(projects, insertProject, updateProject, removeProject)}
           clients={clients}
           packages={packages}
           teamMembers={teamMembers}
           teamProjectPayments={teamProjectPayments} setTeamProjectPayments={setTeamProjectPayments}
           transactions={transactions} 
-          setTransactions={async (updater) => {
-            if (typeof updater === 'function') {
-              const newTransactions = updater(transactions);
-              for (const transaction of newTransactions) {
-                const existing = transactions.find(t => t.id === transaction.id);
-                if (!existing) {
-                  await insertTransaction(transaction);
-                }
-              }
-            }
-          }}
+          setTransactions={createAsyncSetter(transactions, insertTransaction, updateTransaction, removeTransaction)}
           initialAction={initialAction} setInitialAction={setInitialAction}
           profile={profile!}
           showNotification={showNotification}
           cards={cards}
-          setCards={async (updater) => {
-            if (typeof updater === 'function') {
-              const newCards = updater(cards);
-              for (const card of newCards) {
-                const existing = cards.find(c => c.id === card.id);
-                if (existing && JSON.stringify(existing) !== JSON.stringify(card)) {
-                  await updateCard(card.id, card);
-                }
-              }
-            }
-          }}
+          setCards={createAsyncSetter(cards, insertCard, updateCard, removeCard)}
         />;
       case ViewType.TEAM:
         return (
           <Freelancers
             teamMembers={teamMembers}
-            setTeamMembers={async (updater) => {
-              if (typeof updater === 'function') {
-                const newTeamMembers = updater(teamMembers);
-                for (const member of newTeamMembers) {
-                  const existing = teamMembers.find(m => m.id === member.id);
-                  if (!existing) {
-                    await insertTeamMember(member);
-                  } else if (JSON.stringify(existing) !== JSON.stringify(member)) {
-                    await updateTeamMember(member.id, member);
-                  }
-                }
-              }
-            }}
+            setTeamMembers={createAsyncSetter(teamMembers, insertTeamMember, updateTeamMember, removeTeamMember)}
             teamProjectPayments={teamProjectPayments}
             setTeamProjectPayments={setTeamProjectPayments}
             teamPaymentRecords={teamPaymentRecords}
             setTeamPaymentRecords={setTeamPaymentRecords}
             transactions={transactions}
-            setTransactions={async (updater) => {
-              if (typeof updater === 'function') {
-                const newTransactions = updater(transactions);
-                for (const transaction of newTransactions) {
-                  const existing = transactions.find(t => t.id === transaction.id);
-                  if (!existing) {
-                    await insertTransaction(transaction);
-                  }
-                }
-              }
-            }}
+            setTransactions={createAsyncSetter(transactions, insertTransaction, updateTransaction, removeTransaction)}
             userProfile={profile!}
             showNotification={showNotification}
             initialAction={initialAction}
             setInitialAction={setInitialAction}
             projects={projects}
-            setProjects={async (updater) => {
-              if (typeof updater === 'function') {
-                const newProjects = updater(projects);
-                for (const project of newProjects) {
-                  const existing = projects.find(p => p.id === project.id);
-                  if (existing && JSON.stringify(existing) !== JSON.stringify(project)) {
-                    await updateProject(project.id, project);
-                  }
-                }
-              }
-            }}
+            setProjects={createAsyncSetter(projects, insertProject, updateProject, removeProject)}
             rewardLedgerEntries={rewardLedgerEntries}
             setRewardLedgerEntries={setRewardLedgerEntries}
             pockets={pockets}
-            setPockets={async (updater) => {
-              if (typeof updater === 'function') {
-                const newPockets = updater(pockets);
-                for (const pocket of newPockets) {
-                  const existing = pockets.find(p => p.id === pocket.id);
-                  if (existing && JSON.stringify(existing) !== JSON.stringify(pocket)) {
-                    await updatePocket(pocket.id, pocket);
-                  }
-                }
-              }
-            }}
+            setPockets={createAsyncSetter(pockets, insertPocket, updatePocket, removePocket)}
             cards={cards}
-            setCards={async (updater) => {
-              if (typeof updater === 'function') {
-                const newCards = updater(cards);
-                for (const card of newCards) {
-                  const existing = cards.find(c => c.id === card.id);
-                  if (existing && JSON.stringify(existing) !== JSON.stringify(card)) {
-                    await updateCard(card.id, card);
-                  }
-                }
-              }
-            }}
+            setCards={createAsyncSetter(cards, insertCard, updateCard, removeCard)}
             onSignPaymentRecord={handleSignPaymentRecord}
           />
         );
       case ViewType.FINANCE:
         return <Finance 
           transactions={transactions} 
-          setTransactions={async (updater) => {
-            if (typeof updater === 'function') {
-              const newTransactions = updater(transactions);
-              for (const transaction of newTransactions) {
-                const existing = transactions.find(t => t.id === transaction.id);
-                if (!existing) {
-                  await insertTransaction(transaction);
-                } else if (JSON.stringify(existing) !== JSON.stringify(transaction)) {
-                  await updateTransaction(transaction.id, transaction);
-                }
-              }
-            }
-          }}
+          setTransactions={createAsyncSetter(transactions, insertTransaction, updateTransaction, removeTransaction)}
           pockets={pockets} 
-          setPockets={async (updater) => {
-            if (typeof updater === 'function') {
-              const newPockets = updater(pockets);
-              for (const pocket of newPockets) {
-                const existing = pockets.find(p => p.id === pocket.id);
-                if (!existing) {
-                  await insertPocket(pocket);
-                } else if (JSON.stringify(existing) !== JSON.stringify(pocket)) {
-                  await updatePocket(pocket.id, pocket);
-                }
-              }
-            }
-          }}
+          setPockets={createAsyncSetter(pockets, insertPocket, updatePocket, removePocket)}
           projects={projects}
           profile={profile!}
           cards={cards} 
-          setCards={async (updater) => {
-            if (typeof updater === 'function') {
-              const newCards = updater(cards);
-              for (const card of newCards) {
-                const existing = cards.find(c => c.id === card.id);
-                if (!existing) {
-                  await insertCard(card);
-                } else if (JSON.stringify(existing) !== JSON.stringify(card)) {
-                  await updateCard(card.id, card);
-                }
-              }
-            }
-          }}
+          setCards={createAsyncSetter(cards, insertCard, updateCard, removeCard)}
           teamMembers={teamMembers}
           rewardLedgerEntries={rewardLedgerEntries}
         />;
       case ViewType.PACKAGES:
         return <Packages 
           packages={packages} 
-          setPackages={async (updater) => {
-            if (typeof updater === 'function') {
-              const newPackages = updater(packages);
-              for (const pkg of newPackages) {
-                const existing = packages.find(p => p.id === pkg.id);
-                if (!existing) {
-                  await insertPackage(pkg);
-                } else if (JSON.stringify(existing) !== JSON.stringify(pkg)) {
-                  await updatePackage(pkg.id, pkg);
-                }
-              }
-            }
-          }}
+          setPackages={createAsyncSetter(packages, insertPackage, updatePackage, removePackage)}
           addOns={addOns} 
-          setAddOns={async (updater) => {
-            if (typeof updater === 'function') {
-              const newAddOns = updater(addOns);
-              for (const addOn of newAddOns) {
-                const existing = addOns.find(a => a.id === addOn.id);
-                if (!existing) {
-                  await insertAddOn(addOn);
-                } else if (JSON.stringify(existing) !== JSON.stringify(addOn)) {
-                  await updateAddOn(addOn.id, addOn);
-                }
-              }
-            }
-          }}
+          setAddOns={createAsyncSetter(addOns, insertAddOn, updateAddOn, removeAddOn)}
           projects={projects} 
         />;
       case ViewType.ASSETS:
         return <Assets 
           assets={assets} 
-          setAssets={async (updater) => {
-            if (typeof updater === 'function') {
-              const newAssets = updater(assets);
-              for (const asset of newAssets) {
-                const existing = assets.find(a => a.id === asset.id);
-                if (!existing) {
-                  await insertAsset(asset);
-                } else if (JSON.stringify(existing) !== JSON.stringify(asset)) {
-                  await updateAsset(asset.id, asset);
-                }
-              }
-            }
-          }}
+          setAssets={createAsyncSetter(assets, insertAsset, updateAsset, removeAsset)}
           profile={profile!} 
           showNotification={showNotification} 
         />;
       case ViewType.CONTRACTS:
         return <Contracts 
             contracts={contracts} 
-            setContracts={async (updater) => {
-              if (typeof updater === 'function') {
-                const newContracts = updater(contracts);
-                for (const contract of newContracts) {
-                  const existing = contracts.find(c => c.id === contract.id);
-                  if (!existing) {
-                    await insertContract(contract);
-                  } else if (JSON.stringify(existing) !== JSON.stringify(contract)) {
-                    await updateContract(contract.id, contract);
-                  }
-                }
-              }
-            }}
+            setContracts={createAsyncSetter(contracts, insertContract, updateContract, removeContract)}
             clients={clients} projects={projects} profile={profile!}
             showNotification={showNotification}
             initialAction={initialAction} setInitialAction={setInitialAction}
@@ -761,19 +503,7 @@ const AppContent: React.FC = () => {
       case ViewType.SOP:
         return <SOPManagement 
           sops={sops} 
-          setSops={async (updater) => {
-            if (typeof updater === 'function') {
-              const newSOPs = updater(sops);
-              for (const sop of newSOPs) {
-                const existing = sops.find(s => s.id === sop.id);
-                if (!existing) {
-                  await insertSOP(sop);
-                } else if (JSON.stringify(existing) !== JSON.stringify(sop)) {
-                  await updateSOP(sop.id, sop);
-                }
-              }
-            }
-          }}
+          setSops={createAsyncSetter(sops, insertSOP, updateSOP, removeSOP)}
           profile={profile!} 
           showNotification={showNotification} 
         />;
@@ -788,19 +518,7 @@ const AppContent: React.FC = () => {
       case ViewType.CALENDAR:
         return <CalendarView 
           projects={projects} 
-          setProjects={async (updater) => {
-            if (typeof updater === 'function') {
-              const newProjects = updater(projects);
-              for (const project of newProjects) {
-                const existing = projects.find(p => p.id === project.id);
-                if (!existing) {
-                  await insertProject(project);
-                } else if (JSON.stringify(existing) !== JSON.stringify(project)) {
-                  await updateProject(project.id, project);
-                }
-              }
-            }
-          }}
+          setProjects={createAsyncSetter(projects, insertProject, updateProject, removeProject)}
           teamMembers={teamMembers} 
           profile={profile!} 
         />;
@@ -810,54 +528,20 @@ const AppContent: React.FC = () => {
             leads={leads}
             projects={projects}
             feedback={clientFeedback}
-            setFeedback={async (updater) => {
-              if (typeof updater === 'function') {
-                const newFeedback = updater(clientFeedback);
-                for (const feedback of newFeedback) {
-                  const existing = clientFeedback.find(f => f.id === feedback.id);
-                  if (!existing) {
-                    await insertFeedback(feedback);
-                  }
-                }
-              }
-            }}
+            setFeedback={createAsyncSetter(clientFeedback, insertFeedback, updateFeedback, removeFeedback)}
             showNotification={showNotification}
         />;
       case ViewType.SOCIAL_MEDIA_PLANNER:
         return <SocialPlanner 
           posts={socialMediaPosts} 
-          setPosts={async (updater) => {
-            if (typeof updater === 'function') {
-              const newPosts = updater(socialMediaPosts);
-              for (const post of newPosts) {
-                const existing = socialMediaPosts.find(p => p.id === post.id);
-                if (!existing) {
-                  await insertPost(post);
-                } else if (JSON.stringify(existing) !== JSON.stringify(post)) {
-                  await updatePost(post.id, post);
-                }
-              }
-            }
-          }}
+          setPosts={createAsyncSetter(socialMediaPosts, insertPost, updatePost, removePost)}
           projects={projects} 
           showNotification={showNotification} 
         />;
       case ViewType.PROMO_CODES:
         return <PromoCodes 
           promoCodes={promoCodes} 
-          setPromoCodes={async (updater) => {
-            if (typeof updater === 'function') {
-              const newPromoCodes = updater(promoCodes);
-              for (const promo of newPromoCodes) {
-                const existing = promoCodes.find(p => p.id === promo.id);
-                if (!existing) {
-                  await insertPromoCode(promo);
-                } else if (JSON.stringify(existing) !== JSON.stringify(promo)) {
-                  await updatePromoCode(promo.id, promo);
-                }
-              }
-            }
-          }}
+          setPromoCodes={createAsyncSetter(promoCodes, insertPromoCode, updatePromoCode, removePromoCode)}
           projects={projects} 
           showNotification={showNotification} 
         />;
@@ -885,137 +569,37 @@ const AppContent: React.FC = () => {
   // ROUTING FOR PUBLIC PAGES
   if (route.startsWith('#/public-booking')) {
     return <PublicBookingForm 
-        setClients={async (updater) => {
-          if (typeof updater === 'function') {
-            const newClients = updater(clients);
-            for (const client of newClients) {
-              const existing = clients.find(c => c.id === client.id);
-              if (!existing) {
-                await insertClient(client);
-              }
-            }
-          }
-        }}
-        setProjects={async (updater) => {
-          if (typeof updater === 'function') {
-            const newProjects = updater(projects);
-            for (const project of newProjects) {
-              const existing = projects.find(p => p.id === project.id);
-              if (!existing) {
-                await insertProject(project);
-              }
-            }
-          }
-        }}
+        setClients={createAsyncSetter(clients, insertClient, updateClient)}
+        setProjects={createAsyncSetter(projects, insertProject, updateProject)}
         packages={packages}
         addOns={addOns}
-        setTransactions={async (updater) => {
-          if (typeof updater === 'function') {
-            const newTransactions = updater(transactions);
-            for (const transaction of newTransactions) {
-              const existing = transactions.find(t => t.id === transaction.id);
-              if (!existing) {
-                await insertTransaction(transaction);
-              }
-            }
-          }
-        }}
+        setTransactions={createAsyncSetter(transactions, insertTransaction, updateTransaction)}
         userProfile={profile!}
         cards={cards}
-        setCards={async (updater) => {
-          if (typeof updater === 'function') {
-            const newCards = updater(cards);
-            for (const card of newCards) {
-              const existing = cards.find(c => c.id === card.id);
-              if (existing && JSON.stringify(existing) !== JSON.stringify(card)) {
-                await updateCard(card.id, card);
-              }
-            }
-          }
-        }}
+        setCards={createAsyncSetter(cards, insertCard, updateCard)}
         pockets={pockets}
-        setPockets={async (updater) => {
-          if (typeof updater === 'function') {
-            const newPockets = updater(pockets);
-            for (const pocket of newPockets) {
-              const existing = pockets.find(p => p.id === pocket.id);
-              if (existing && JSON.stringify(existing) !== JSON.stringify(pocket)) {
-                await updatePocket(pocket.id, pocket);
-              }
-            }
-          }
-        }}
+        setPockets={createAsyncSetter(pockets, insertPocket, updatePocket)}
         promoCodes={promoCodes}
-        setPromoCodes={async (updater) => {
-          if (typeof updater === 'function') {
-            const newPromoCodes = updater(promoCodes);
-            for (const promo of newPromoCodes) {
-              const existing = promoCodes.find(p => p.id === promo.id);
-              if (existing && JSON.stringify(existing) !== JSON.stringify(promo)) {
-                await updatePromoCode(promo.id, promo);
-              }
-            }
-          }
-        }}
+        setPromoCodes={createAsyncSetter(promoCodes, insertPromoCode, updatePromoCode)}
         showNotification={showNotification}
-        setLeads={async (updater) => {
-          if (typeof updater === 'function') {
-            const newLeads = updater(leads);
-            for (const lead of newLeads) {
-              const existing = leads.find(l => l.id === lead.id);
-              if (!existing) {
-                await insertLead(lead);
-              }
-            }
-          }
-        }}
+        setLeads={createAsyncSetter(leads, insertLead, updateLead)}
     />;
   }
   if (route.startsWith('#/public-lead-form')) {
     return <PublicLeadForm 
-        setLeads={async (updater) => {
-          if (typeof updater === 'function') {
-            const newLeads = updater(leads);
-            for (const lead of newLeads) {
-              const existing = leads.find(l => l.id === lead.id);
-              if (!existing) {
-                await insertLead(lead);
-              }
-            }
-          }
-        }}
+        setLeads={createAsyncSetter(leads, insertLead, updateLead)}
         userProfile={profile!}
         showNotification={showNotification}
     />;
   }
   if (route.startsWith('#/feedback')) {
     return <PublicFeedbackForm 
-      setClientFeedback={async (updater) => {
-        if (typeof updater === 'function') {
-          const newFeedback = updater(clientFeedback);
-          for (const feedback of newFeedback) {
-            const existing = clientFeedback.find(f => f.id === feedback.id);
-            if (!existing) {
-              await insertFeedback(feedback);
-            }
-          }
-        }
-      }}
+      setClientFeedback={createAsyncSetter(clientFeedback, insertFeedback, updateFeedback)}
     />;
   }
   if (route.startsWith('#/suggestion-form')) {
     return <SuggestionForm 
-      setLeads={async (updater) => {
-        if (typeof updater === 'function') {
-          const newLeads = updater(leads);
-          for (const lead of newLeads) {
-            const existing = leads.find(l => l.id === lead.id);
-            if (!existing) {
-              await insertLead(lead);
-            }
-          }
-        }
-      }}
+      setLeads={createAsyncSetter(leads, insertLead, updateLead)}
     />;
   }
   if (route.startsWith('#/revision-form')) {
@@ -1027,17 +611,7 @@ const AppContent: React.FC = () => {
         accessId={accessId} 
         clients={clients} 
         projects={projects} 
-        setClientFeedback={async (updater) => {
-          if (typeof updater === 'function') {
-            const newFeedback = updater(clientFeedback);
-            for (const feedback of newFeedback) {
-              const existing = clientFeedback.find(f => f.id === feedback.id);
-              if (!existing) {
-                await insertFeedback(feedback);
-              }
-            }
-          }
-        }}
+        setClientFeedback={createAsyncSetter(clientFeedback, insertFeedback, updateFeedback)}
         showNotification={showNotification} 
         contracts={contracts} 
         transactions={transactions}

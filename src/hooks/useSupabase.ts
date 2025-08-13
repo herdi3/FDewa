@@ -614,17 +614,70 @@ export function useAuth() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check if there's a stored session
-    const storedUser = localStorage.getItem('currentUser');
-    if (storedUser) {
-      setUser(JSON.parse(storedUser));
-    }
-    setLoading(false);
+    const checkUser = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          // Get user details from our users table
+          const { data: userData, error } = await supabase
+            .from('users')
+            .select('*')
+            .eq('email', session.user.email)
+            .single();
+
+          if (userData && !error) {
+            const user: User = {
+              id: userData.id,
+              email: userData.email,
+              password: '', // Don't store password in state
+              fullName: userData.full_name,
+              role: userData.role,
+              permissions: userData.permissions
+            };
+            setUser(user);
+          }
+        }
+      } catch (error) {
+        console.error('Error checking user session:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    checkUser();
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_OUT' || !session) {
+        setUser(null);
+      } else if (session?.user) {
+        const { data: userData } = await supabase
+          .from('users')
+          .select('*')
+          .eq('email', session.user.email)
+          .single();
+
+        if (userData) {
+          setUser({
+            id: userData.id,
+            email: userData.email,
+            password: '',
+            fullName: userData.full_name,
+            role: userData.role,
+            permissions: userData.permissions
+          });
+        }
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
   const signIn = async (email: string, password: string) => {
     try {
-      // For demo purposes, we'll use the existing users table
+      // First check if user exists in our users table
       const { data: userData, error: userError } = await supabase
         .from('users')
         .select('*')
@@ -635,18 +688,26 @@ export function useAuth() {
         return { user: null, error: 'User not found' };
       }
 
-      // Simple password check (in production, use proper hashing)
-      if (userData.password === password) {
+      // For demo purposes, we'll use simple password comparison
+      // In production, you should use proper password hashing
+      if (userData.password_hash === password) {
+        // Create a session (simplified for demo)
         const user: User = {
           id: userData.id,
           email: userData.email,
-          password: userData.password,
+          password: '',
           fullName: userData.full_name,
           role: userData.role,
           permissions: userData.permissions
         };
         setUser(user);
-        localStorage.setItem('currentUser', JSON.stringify(user));
+        
+        // Store session info
+        localStorage.setItem('supabase_session', JSON.stringify({
+          user: { email: userData.email },
+          expires_at: Date.now() + (24 * 60 * 60 * 1000) // 24 hours
+        }));
+        
         return { user, error: null };
       } else {
         return { user: null, error: 'Invalid credentials' };
@@ -657,8 +718,9 @@ export function useAuth() {
   };
 
   const signOut = async () => {
+    await supabase.auth.signOut();
     setUser(null);
-    localStorage.removeItem('currentUser');
+    localStorage.removeItem('supabase_session');
   };
 
   return {
@@ -677,7 +739,7 @@ export function useProfile() {
   const fetchProfile = async () => {
     try {
       const { data, error } = await supabase
-        .from('user_profiles')
+        .from('profiles')
         .select('*')
         .single();
 
@@ -751,9 +813,9 @@ export function useProfile() {
       dbUpdates.updated_at = new Date().toISOString();
 
       const { error } = await supabase
-        .from('user_profiles')
+        .from('profiles')
         .update(dbUpdates)
-        .eq('id', profile?.id || '');
+        .eq('id', 1); // Assuming single profile setup
 
       if (error) throw error;
       
